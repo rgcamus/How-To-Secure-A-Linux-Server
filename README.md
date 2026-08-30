@@ -43,6 +43,7 @@ An evolving how-to guide for securing a Linux server that, hopefully, also teach
   - [Add Panic/Secondary/Fake password Login Security System](#add-panicsecondaryfake-password-login-security-system)
 - [The Network](#the-network)
   - [Firewall With UFW (Uncomplicated Firewall)](#firewall-with-ufw-uncomplicated-firewall)
+  - [Docker And UFW](#docker-and-ufw)
   - [iptables Intrusion Detection And Prevention with PSAD](#iptables-intrusion-detection-and-prevention-with-psad)
   - [Application Intrusion Detection And Prevention With Fail2Ban](#application-intrusion-detection-and-prevention-with-fail2ban) 
   - [Application Intrusion Detection And Prevention With CrowdSec](#application-intrusion-detection-and-prevention-with-crowdsec)
@@ -1885,6 +1886,125 @@ Then you can enable it like any other app:
 ```bash
 sudo ufw allow plexmediaserver
 ```
+
+([Table of Contents](#table-of-contents))
+
+### Docker And UFW
+
+#### Why
+
+Docker-published ports can be reachable even when UFW's incoming policy is `deny` and no UFW rule allows the port. This can expose a container service that you expected the host firewall to block. `ufw status` does not show rules created by Docker and is therefore not, by itself, a complete view of the host's network exposure.
+
+This section applies primarily to rootful Docker Engine containers using bridge networks. Host, macvlan, ipvlan, rootless, Swarm, and native nftables configurations have different network and firewall behavior and require their own review.
+
+#### How It Works
+
+Docker creates firewall and NAT rules on the host to provide bridge networking and port publishing. Incoming packets for a published port are DNATed to the container and traverse the host's `FORWARD` path and Docker chains instead of the `INPUT` rules normally managed by UFW. Container egress is also forwarded rather than traversing the host's usual `OUTPUT` path. As a result, Docker and UFW can apply conflicting policies, with Docker's rules effectively bypassing UFW for published container ports.
+
+For example, this publishes the container's TCP port 80 on port 8080 of every host address, including IPv4 and usually IPv6:
+
+``` bash
+docker run --publish 8080:80 nginx
+```
+
+Do not assume `sudo ufw deny 8080/tcp` makes that published port unreachable.
+
+#### Goals
+
+- publish only the ports that must be reachable outside a container network
+- bind private services to loopback instead of every host interface
+- explicitly filter container traffic that must be published externally
+- verify exposure from another host, not only with `ufw status`
+
+#### Safe Defaults
+
+1. Do not publish a port if only other containers need to reach it. Connect the containers to the same user-defined Docker network and use the container name and internal port instead.
+
+1. For services that should only be reachable from the Docker host, explicitly bind both IPv4 and IPv6 loopback addresses:
+
+    ``` bash
+    docker run \
+      --publish 127.0.0.1:8080:80 \
+      --publish '[::1]:8080:80' \
+      nginx
+    ```
+
+    The equivalent Docker Compose configuration is:
+
+    ``` yaml
+    services:
+      web:
+        image: nginx
+        ports:
+          - "127.0.0.1:8080:80"
+          - "[::1]:8080:80"
+    ```
+
+    > [!WARNING]
+    > Docker Engine releases older than 28.0.0 may allow hosts on the same layer-2 network to reach ports published to a loopback address. Upgrade Docker Engine rather than relying on loopback binding with an affected release.
+
+1. If a service must be remotely accessible, either place a host-based reverse proxy in front of a loopback-bound container or add an explicit policy before Docker's accept rules. With Docker's iptables firewall backend, user rules belong in the `DOCKER-USER` chain, not in Docker-managed chains or at the end of `FORWARD`.
+
+    The following example allows new connections to published containers from the documentation subnet `192.0.2.0/24` on `eth0`, while preserving established connections. Replace both values for your host before using it:
+
+    ``` bash
+    EXT_IF="eth0"
+    TRUSTED_NET="192.0.2.0/24"
+
+    sudo iptables -I DOCKER-USER 1 -i "$EXT_IF" \
+      -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    sudo iptables -I DOCKER-USER 2 -i "$EXT_IF" \
+      ! -s "$TRUSTED_NET" -j DROP
+    ```
+
+    These commands restrict IPv4 traffic only. If the host has IPv6 enabled, add an equivalent policy with `ip6tables`; otherwise, the published port may remain accessible over IPv6:
+
+    ``` bash
+    TRUSTED_NET6="2001:db8::/32"
+
+    sudo ip6tables -I DOCKER-USER 1 -i "$EXT_IF" \
+      -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    sudo ip6tables -I DOCKER-USER 2 -i "$EXT_IF" \
+      ! -s "$TRUSTED_NET6" -j DROP
+    ```
+
+    These commands restrict all Docker-published traffic arriving through that interface, not just one port. The example IPv4 and IPv6 ranges are reserved for documentation; replace them with networks you control. Rules entered interactively may not survive a reboot or firewall reload. Make them persistent using a mechanism that runs after Docker has created `DOCKER-USER`, then test that rule ordering remains correct. Matching the original host address or port after Docker's DNAT requires the `conntrack` extension; see Docker's firewall documentation before creating a narrower policy.
+
+    Docker's native nftables backend does not provide an iptables `DOCKER-USER` chain. Follow Docker's nftables documentation and create a separate nftables base chain with an appropriate hook and priority instead.
+
+1. Do not set Docker's `iptables` or `ip6tables` daemon options to `false` as a shortcut. Docker documents that this is unsuitable for most users: it is likely to break container networking and can leave container ports reachable on the local network unless you provide a complete replacement ruleset.
+
+#### Audit Published Ports
+
+List all running containers and their published addresses:
+
+``` bash
+docker ps --format 'table {{.Names}}\t{{.Ports}}'
+```
+
+Treat mappings containing `0.0.0.0` or `::` as potentially reachable through every corresponding host interface. Review Docker's IPv4 and IPv6 rules when the iptables backend is in use:
+
+``` bash
+sudo iptables -S DOCKER-USER
+sudo iptables -t nat -S DOCKER
+sudo ip6tables -S DOCKER-USER
+sudo ip6tables -t nat -S DOCKER
+```
+
+When Docker's native nftables backend is in use, inspect the complete nftables ruleset, including Docker's IPv4 and IPv6 tables and any separate table containing your policy:
+
+``` bash
+sudo nft list ruleset
+```
+
+Finally, scan or connect to each expected port from another machine on every relevant network. A local test and `ufw status` can miss the forwarding path used by Docker.
+
+#### References
+
+- https://docs.docker.com/engine/network/packet-filtering-firewalls/#docker-and-ufw
+- https://docs.docker.com/engine/network/firewall-iptables/
+- https://docs.docker.com/engine/network/firewall-nftables/
+- https://docs.docker.com/engine/network/port-publishing/
 
 ([Table of Contents](#table-of-contents))
 
