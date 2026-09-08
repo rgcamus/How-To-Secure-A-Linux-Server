@@ -3277,75 +3277,70 @@ This sections cover things that are high risk because there is a possibility the
 
 #### Why
 
-The kernel is the brains of a Linux system. Securing it just makes sense.
+The kernel is the brains of a Linux system. A short, current `sysctl` baseline closes some easy local and network holes: `/tmp` races, kernel pointer leaks, unprivileged BPF, ICMP redirects, IPv4 source routing.
 
 #### Why Not
 
-Changing kernel settings with sysctl is risky and could break your server. If you don't know what you are doing, don't have the time to debug issues, or just don't want to take the risks, I would advise from not following these steps.
-
-#### Disclaimer
-
-I am not as knowledgeable about hardening/securing a Linux kernel as I'd like. As much as I hate to admit it, I do not know what all of these settings do. My understanding is that most of them are general kernel hardening and performance, and the others are to protect against spoofing and DOS attacks.
-
-In fact, since I am not 100% sure exactly what each setting does, I took recommended settings from numerous sites (all linked in the references below) and combined them to figure out what should be set. I figure if multiple reputable sites mention the same setting, it's probably safe.
-
-If you have a better understanding of what these settings do, or have any other feedback/advice on them, please [let me know](#contacting-me).
-
-I won't provide [For the lazy](#editing-configuration-files---for-the-lazy) code in this section.
+A bad value can break IPv6, a VPN, containers, or the only debugging tool you have left. If you do not want to read the notes next to each key, skip this section.
 
 #### Notes
 
-- Documentation on all the sysctl settings/keys is severely lacking. The [documentation I can find](https://github.com/torvalds/linux/tree/master/Documentation) seems to reference the 2.2 version kernel. I could not find anything newer. If you know where I can, please [let me know](#contacting-me).
-- The reference sites listed below have more comments on what each setting does.
+- The settings, the rationale, and the old-list cleanup live in [linux-kernel-sysctl-hardening.md](linux-kernel-sysctl-hardening.md). That file is the source of truth. This section is only how to apply it.
+- Current kernel documentation is on [docs.kernel.org](https://docs.kernel.org/admin-guide/sysctl/index.html). The old "this is all for kernel 2.2" claim was wrong.
+- This is a non-routing host baseline. Do not paste it onto a router, a Docker/Kubernetes host that forwards traffic, or a machine that gets its IPv6 default route from router advertisements until you have read the role-dependent section in that file.
+- Treat the listed values as floors. If your distribution already ships a stricter number, keep it.
+- Put local policy in `/etc/sysctl.d/90-server-hardening.conf`, not only in `/etc/sysctl.conf`. `sysctl -p` with no argument reads `/etc/sysctl.conf` and will miss a drop-in.
+- Keep a second root-capable session open before you apply anything.
+- I won't provide [For the lazy](#editing-configuration-files---for-the-lazy) one-liners here. Copy from the companion file after you have deleted keys your kernel does not have.
 
 #### References
 
-- https://github.com/torvalds/linux/tree/master/Documentation
-- https://www.cyberciti.biz/faq/linux-kernel-etcsysctl-conf-security-hardening/
-- https://geektnt.com/sysctl-conf-hardening.html
-- https://linoxide.com/how-tos/linux-server-protection/
-- https://github.com/klaver/sysctl/blob/master/sysctl.conf
-- https://cloudpro.zone/index.php/2018/01/30/debian-9-3-server-setup-guide-part-5/
+- [linux-kernel-sysctl-hardening.md](linux-kernel-sysctl-hardening.md)
+- https://docs.kernel.org/admin-guide/sysctl/index.html
+- https://docs.kernel.org/networking/ip-sysctl.html
+- https://docs.kernel.org/admin-guide/LSM/Yama.html
+- https://man7.org/linux/man-pages/man5/sysctl.d.5.html
 
 #### Steps
 
-1. The sysctl settings can be found in the [linux-kernel-sysctl-hardening.md](https://github.com/imthenachoman/How-To-Secure-A-Linux-Server/blob/master/linux-kernel-sysctl-hardening.md) file in this repo.
+1. Read [linux-kernel-sysctl-hardening.md](linux-kernel-sysctl-hardening.md) and drop any key that does not exist on your kernel:
 
-1. Before you make a kernel sysctl change permanent, you can test it with the sysctl command:
-
-    ``` bash
-    sudo sysctl -w [key=value]
+    ```bash
+    sysctl kernel.yama.ptrace_scope
     ```
 
-    Example:
+    If that fails, delete the line. Do not hide the error.
 
-    ``` bash
-    sudo sysctl -w kernel.ctrl-alt-del=0
+1. Save a read-only snapshot of the current values. The companion file shows how. Keep it for reference, but do not load the whole snapshot later because it also contains unrelated and read-only keys.
+
+1. Test one setting in memory. No spaces around `=` in `sysctl -w`:
+
+    ```bash
+    sudo sysctl -w kernel.dmesg_restrict=1
+    sysctl kernel.dmesg_restrict
     ```
 
-    **Note**: There are no spaces in `key=value`, including before and after the space.
+1. Create `/etc/sysctl.d/90-server-hardening.conf` from the example in the companion file. On a systemd host, apply the same loader used at boot and read its log:
 
-1. Once you have tested a setting, and made sure it works without breaking your server, you can make it permanent by adding the values to `/etc/sysctl.conf`. For example:
-
-    ``` bash
-    $ sudo cat /etc/sysctl.conf
-    kernel.ctrl-alt-del = 0
-    fs.file-max = 65535
-    ...
-    kernel.sysrq = 0
+    ```bash
+    sudo systemctl restart systemd-sysctl.service
+    sudo journalctl -b -u systemd-sysctl.service --no-pager
     ```
 
-1. After updating the file you can reload the settings or reboot. To reload:
+    On a system that uses procps instead, follow the separate procps instructions in the companion file. Do not mix the two loaders: their handling of `/etc/sysctl.conf` differs.
 
-    ``` bash
-    sudo sysctl -p
+1. Read the values back, including per-interface keys. Unknown-key errors on stderr are real. Fix the file.
+
+1. Reboot once and read them back again.
+
+1. To undo a reversible change, move the drop-in aside. Restarting `systemd-sysctl` does not restore old runtime values, so either write the previous values back individually or reboot:
+
+    ```bash
+    sudo mv /etc/sysctl.d/90-server-hardening.conf \
+      /etc/sysctl.d/90-server-hardening.conf.disabled
     ```
 
-**Note**: If sysctl has trouble writing any settings then `sysctl -w` or `sysctl -p` will write an error to stderr. You can use this to quickly find invalid settings in  your `/etc/sysctl.conf` file:
-
-``` bash
-sudo sysctl -p >/dev/null
-```
+    Keys marked irreversible in the companion file need a reboot after the drop-in is gone.
 
 </details><br />
 
