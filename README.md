@@ -119,6 +119,7 @@ There are many guides provided by experts, industry leaders, and the distributio
 - https://news.ycombinator.com/item?id=19178964
 - https://wiki.archlinux.org/index.php/Security - many folks have also recommended this one
 - https://securecompliance.co/linux-server-hardening-checklist/
+- [VPS-SECURE](https://github.com/rockballslab/vps-secure) - One-command Ubuntu 24.04 VPS hardening: SSH key-only on 2222, CrowdSec IPS, Endlessh honeypot, UFW with Docker bypass fixed, kernel hardening, AIDE/rkhunter/auditd, Telegram alerts.
 
 ([Table of Contents](#table-of-contents))
 
@@ -574,7 +575,11 @@ SSH is a door into your server. This is especially true if you are opening ports
     # verify hostname matches IP
     UseDNS yes
 
-    Compression no
+    # OpenSSH only supports delayed (post-authentication) compression since
+    # 6.7, and removed pre-auth compression support entirely in 7.4 (2016),
+    # so the old compression-oracle attack surface this setting guarded
+    # against no longer exists on any currently supported OpenSSH version
+    Compression yes
     
     # TCP keepalive is spoofable (runs outside the encrypted channel)
 	# Use ClientAlive instead (runs inside the encrypted channel)
